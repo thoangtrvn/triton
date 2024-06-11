@@ -33,13 +33,15 @@ public:
 
   virtual bool warpReduce(ConversionPatternRewriter &rewriter, Location loc,
                           SmallVector<Value> &acc, triton::ReduceOp op,
-                          unsigned numLaneToReduce) const = 0;
+                          unsigned numLaneToReduce,
+                          unsigned interleave) const = 0;
 
   virtual bool processReplicaUsingStMatrix(
       ConversionPatternRewriter &rewriter, Location loc, Value smemBase,
       SmallVector<Value> &vals, RankedTensorType srcTy, Type elemTy,
       ArrayRef<unsigned> paddedRepShape, ArrayRef<unsigned> origRepShape,
-      ArrayRef<unsigned> outOrd, unsigned accumNumReplicates) const = 0;
+      ArrayRef<unsigned> outOrd, unsigned accumNumReplicates,
+      int swizzleByteWidth = 0) const = 0;
 
   virtual std::string getMulhiFuncName(Type resultElementTy) const = 0;
   // Emits LLVM code with |rewriter| to print a message following the given

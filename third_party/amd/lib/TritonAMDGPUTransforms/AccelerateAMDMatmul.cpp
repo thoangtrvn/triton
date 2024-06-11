@@ -134,7 +134,7 @@ Value convertAndCastTensor(mlir::PatternRewriter &rewriter, Value value,
   assert(newElemType.isIntOrFloat());
 
   auto loc = value.getLoc();
-  auto oldType = value.getType().cast<RankedTensorType>();
+  auto oldType = cast<RankedTensorType>(value.getType());
   auto oldElemType = oldType.getElementType();
 
   assert(oldElemType.isIntOrFloat());
@@ -234,12 +234,12 @@ public:
   chooseMfmaDimensions(tt::DotOp dot) const {
     // number of matrix elements along k dim per one MFMA intruction
     unsigned kDim = 0;
-    auto opType = dot.getA().getType().cast<RankedTensorType>();
+    auto opType = cast<RankedTensorType>(dot.getA().getType());
     auto dataTypeA = opType.getElementType();
     auto dataTypeB =
-        dot.getB().getType().cast<RankedTensorType>().getElementType();
+        cast<RankedTensorType>(dot.getB().getType()).getElementType();
 
-    auto resType = dot.getD().getType().cast<RankedTensorType>();
+    auto resType = cast<RankedTensorType>(dot.getD().getType());
     auto resShape = resType.getShape();
     auto rank = resShape.size();
     auto M = resShape[rank - 2];
@@ -299,7 +299,7 @@ public:
 
     RankedTensorType oldRetType = dotOp.getType();
     if (!oldRetType.getEncoding() ||
-        !oldRetType.getEncoding().isa<ttg::BlockedEncodingAttr>())
+        !isa<ttg::BlockedEncodingAttr>(oldRetType.getEncoding()))
       return failure();
 
     if (!supportMFMA(dotOp))
@@ -315,8 +315,8 @@ public:
     // operands
     Value a = dotOp.getA();
     Value b = dotOp.getB();
-    auto oldAType = a.getType().cast<RankedTensorType>();
-    auto oldBType = b.getType().cast<RankedTensorType>();
+    auto oldAType = cast<RankedTensorType>(a.getType());
+    auto oldBType = cast<RankedTensorType>(b.getType());
     auto ctx = oldAType.getContext();
 
     ttg::AMDMfmaEncodingAttr mfmaEnc;
@@ -372,7 +372,7 @@ public:
     // in mfma 4x4 case argument matrix groups in 16 groups
     if (mDim == 4 && nDim == 4)
       kWidth = kDim / 16;
-    if (mDim == 4 && nDim == 64 || mDim == 64 && nDim == 4)
+    if ((mDim == 4 && nDim == 64) || (mDim == 64 && nDim == 4))
       kWidth = kDim;
 
     // We want to extend kWidth by kPack (kPack=1 means no extension)
@@ -405,9 +405,8 @@ public:
 };
 static Value promoteOperand(OpBuilder &builder, Location loc, Value operand,
                             Type promotedType) {
-  Type tensorPromotedType =
-      operand.getType().cast<RankedTensorType>().cloneWith(std::nullopt,
-                                                           promotedType);
+  Type tensorPromotedType = cast<RankedTensorType>(operand.getType())
+                                .cloneWith(std::nullopt, promotedType);
   return builder.create<triton::FpToFpOp>(loc, tensorPromotedType, operand);
 }
 
@@ -419,7 +418,7 @@ static void decomposeMixedModeDotOp(ModuleOp mod) {
     OpBuilder builder(dotOp);
     Type AElType = dotOp.getA().getType().getElementType();
     Type promoteType;
-    if (D.getType().getEncoding().isa<AMDMfmaEncodingAttr>()) {
+    if (isa<AMDMfmaEncodingAttr>(D.getType().getEncoding())) {
       Type BElType = dotOp.getB().getType().getElementType();
 
       auto maxBitWidth = std::max(AElType.getIntOrFloatBitWidth(),
@@ -436,7 +435,7 @@ static void decomposeMixedModeDotOp(ModuleOp mod) {
         promoteType = builder.getF16Type();
       else if (maxBitWidth <= 32)
         promoteType = builder.getF32Type();
-    } else if (D.getType().getEncoding().isa<AMDWmmaEncodingAttr>()) {
+    } else if (isa<AMDWmmaEncodingAttr>(D.getType().getEncoding())) {
       Type BElType = dotOp.getB().getType().getElementType();
 
       if (AElType == BElType)
@@ -451,6 +450,56 @@ static void decomposeMixedModeDotOp(ModuleOp mod) {
       // FMA case.
       Type AElType = dotOp.getA().getType().getElementType();
       Type DElType = D.getType().getElementType();
+
+      // Convert int operands to FP32 to apply FMA case
+      // Do it here instead of introducing new pattern because the pass is more
+      // about MMA dots.
+      // TODO: Introduce new pass for FMA dots legalization.
+      if (AElType.isIntOrIndex()) {
+        assert(dotOp.getB().getType().getElementType().isIntOrIndex() &&
+               dotOp.getC().getType().getElementType().isIntOrIndex() &&
+               DElType.isIntOrIndex());
+        auto convertTensorIToFP = [&](Value v) -> Value {
+          RankedTensorType vTy = cast<RankedTensorType>(v.getType());
+          Type dstType = vTy.cloneWith(std::nullopt, builder.getF32Type());
+          Type srcElType = vTy.getElementType();
+          return !srcElType.isUnsignedInteger()
+                     ? builder
+                           .create<mlir::arith::SIToFPOp>(dotOp.getLoc(),
+                                                          dstType, v)
+                           .getResult()
+                     : builder
+                           .create<mlir::arith::UIToFPOp>(dotOp.getLoc(),
+                                                          dstType, v)
+                           .getResult();
+        };
+        auto convertTensorFPToI = [&](Type dstElType, Value v) -> Value {
+          RankedTensorType vTy = cast<RankedTensorType>(v.getType());
+          Type dstType = vTy.cloneWith(std::nullopt, dstElType);
+          return !dstElType.isUnsignedInteger()
+                     ? builder
+                           .create<mlir::arith::FPToSIOp>(dotOp.getLoc(),
+                                                          dstType, v)
+                           .getResult()
+                     : builder
+                           .create<mlir::arith::FPToUIOp>(dotOp.getLoc(),
+                                                          dstType, v)
+                           .getResult();
+        };
+
+        auto newAOperand = convertTensorIToFP(dotOp.getA());
+        auto newBOperand = convertTensorIToFP(dotOp.getB());
+        auto newCOperand = convertTensorIToFP(dotOp.getC());
+        auto newDot = builder.create<tt::DotOp>(
+            dotOp.getLoc(), newCOperand.getType(), newAOperand, newBOperand,
+            newCOperand, dotOp.getInputPrecision(),
+            dotOp.getMaxNumImpreciseAcc());
+        auto newD = convertTensorFPToI(DElType, newDot.getResult());
+        D.replaceAllUsesWith(newD);
+        dotOp.erase();
+        return;
+      }
+
       if (AElType == DElType)
         return;
       promoteType = DElType;
@@ -473,12 +522,11 @@ public:
                   mlir::PatternRewriter &rewriter) const override {
     auto dotOp = cast<tt::DotOp>(op);
 
-    auto oldRetType = dotOp.getResult().getType().cast<RankedTensorType>();
+    auto oldRetType = cast<RankedTensorType>(dotOp.getResult().getType());
     if (!oldRetType.getEncoding() ||
-        !oldRetType.getEncoding().isa<ttg::BlockedEncodingAttr>())
+        !isa<ttg::BlockedEncodingAttr>(oldRetType.getEncoding()))
       return failure();
 
-    // TODO: Support different operand types
     if (!supportWMMA(dotOp))
       return failure();
 
@@ -490,8 +538,8 @@ public:
     // operands
     Value a = dotOp.getA();
     Value b = dotOp.getB();
-    auto oldAType = a.getType().cast<RankedTensorType>();
-    auto oldBType = b.getType().cast<RankedTensorType>();
+    auto oldAType = cast<RankedTensorType>(a.getType());
+    auto oldBType = cast<RankedTensorType>(b.getType());
     auto ctx = oldAType.getContext();
 
     AMDWmmaEncodingAttr wmmaEnc;
@@ -509,15 +557,22 @@ public:
     Type wmmaAccType;
     auto oldRetElemType = oldRetType.getElementType();
     auto aElemType = oldAType.getElementType();
-    if (oldRetElemType.isIntOrIndex())
+    auto bElemType = oldBType.getElementType();
+    if (oldRetElemType.isIntOrIndex()) {
       wmmaAccType = rewriter.getIntegerType(32);
-    else if (oldRetElemType.isa<mlir::Float16Type, mlir::BFloat16Type>() &&
-             aElemType == oldRetElemType)
+    } else if (isa<mlir::Float16Type, mlir::BFloat16Type>(oldRetElemType) &&
+               aElemType == oldRetElemType) {
       wmmaAccType = oldRetElemType;
-    else
+    } else if (isa<mlir::FloatType>(oldRetElemType) &&
+               aElemType.getIntOrFloatBitWidth() < 16) {
+      aElemType = rewriter.getF16Type();
+      bElemType = rewriter.getF16Type();
+      wmmaAccType = rewriter.getF16Type();
+    } else {
       wmmaAccType = rewriter.getF32Type();
+    }
 
-    auto newRetType = RankedTensorType::get(retShape, oldRetElemType, wmmaEnc);
+    auto newRetType = RankedTensorType::get(retShape, wmmaAccType, wmmaEnc);
 
     // convert accumulator
     auto oldAcc = dotOp.getOperand(2);
@@ -527,13 +582,16 @@ public:
         oldAType.getShape(), aElemType,
         ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, mnkDim[2]));
     auto newBType = RankedTensorType::get(
-        oldBType.getShape(), oldBType.getElementType(),
+        oldBType.getShape(), bElemType,
         ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaEnc, mnkDim[2]));
-    a = rewriter.create<ttg::ConvertLayoutOp>(a.getLoc(), newAType, a);
-    b = rewriter.create<ttg::ConvertLayoutOp>(b.getLoc(), newBType, b);
-    auto newDot = rewriter.create<tt::DotOp>(dotOp.getLoc(), newRetType, a, b,
-                                             newAcc, dotOp.getInputPrecision(),
-                                             dotOp.getMaxNumImpreciseAcc());
+
+    Value castedA =
+        convertAndCastTensor(rewriter, a, newAType.getEncoding(), aElemType);
+    Value castedB =
+        convertAndCastTensor(rewriter, b, newBType.getEncoding(), bElemType);
+    auto newDot = rewriter.create<tt::DotOp>(
+        dotOp.getLoc(), newRetType, castedA, castedB, newAcc,
+        dotOp.getInputPrecision(), dotOp.getMaxNumImpreciseAcc());
 
     Value dotOutput = convertAndCastTensor(
         rewriter, newDot, oldRetType.getEncoding(), oldRetElemType);

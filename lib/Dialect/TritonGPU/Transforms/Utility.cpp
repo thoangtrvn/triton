@@ -1,17 +1,20 @@
 #include "triton/Analysis/Utility.h"
+
+#include <fstream>
+
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Analysis/AxisInfo.h"
+#include "triton/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "llvm/Support/Debug.h"
-
-#include <fstream>
 #define DEBUG_TYPE "ttg-utility"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
@@ -22,7 +25,7 @@ using namespace triton;
 
 SmallVector<unsigned, 3> mmaVersionToInstrShape(int version,
                                                 const ArrayRef<int64_t> &shape,
-                                                TensorOrMemDesc type,
+                                                RankedTensorType type,
                                                 int numWarps) {
   if (version == 1)
     return {16, 16};
@@ -235,7 +238,7 @@ std::string GraphDumper::emitValueNode(Value value) const {
   NodeInfo info = onValue(value);
   if (info.find("label") == info.end()) {
     std::string shapeStr = getShapeStr(value.getType());
-    if (auto arg = value.dyn_cast<BlockArgument>())
+    if (auto arg = mlir::dyn_cast<BlockArgument>(value))
       info["label"] =
           "BlockArg" + std::to_string(arg.getArgNumber()) + " " + shapeStr;
     else
@@ -263,15 +266,15 @@ GraphDumper::NodeInfo GraphLayoutMarker::onValue(Value value) const {
 std::string GraphLayoutMarker::getColor(const Type &type) const {
   if (auto tensorTy = dyn_cast<RankedTensorType>(type)) {
     auto layout = tensorTy.getEncoding();
-    if (layout.isa<triton::gpu::BlockedEncodingAttr>())
+    if (isa<triton::gpu::BlockedEncodingAttr>(layout))
       return "green";
-    else if (layout.isa<triton::gpu::SliceEncodingAttr>())
+    else if (isa<triton::gpu::SliceEncodingAttr>(layout))
       return "yellow";
-    else if (layout.isa<triton::gpu::NvidiaMmaEncodingAttr>())
+    else if (isa<triton::gpu::NvidiaMmaEncodingAttr>(layout))
       return "lightslateblue";
-    else if (layout.isa<triton::gpu::DotOperandEncodingAttr>())
+    else if (isa<triton::gpu::DotOperandEncodingAttr>(layout))
       return "orange";
-    else if (layout.isa<triton::gpu::SharedEncodingAttr>())
+    else if (isa<triton::gpu::SharedEncodingAttr>(layout))
       return "orangered";
     else {
       llvm::report_fatal_error("Unrecognized layout");
@@ -291,7 +294,7 @@ static std::optional<Attribute> inferDstEncoding(triton::ReduceOp op,
 
 static std::optional<Attribute> inferDstEncoding(triton::ExpandDimsOp op,
                                                  Attribute encoding) {
-  auto sliceEncoding = encoding.dyn_cast<triton::gpu::SliceEncodingAttr>();
+  auto sliceEncoding = mlir::dyn_cast<triton::gpu::SliceEncodingAttr>(encoding);
   if (!sliceEncoding)
     return std::nullopt;
   if (op.getAxis() != sliceEncoding.getDim())
@@ -325,7 +328,7 @@ static std::optional<Attribute> inferDstEncoding(SplitOp op, Attribute srcEnc) {
 
 static std::optional<Attribute> inferSrcEncoding(triton::ReduceOp op,
                                                  Attribute encoding) {
-  auto sliceEncoding = encoding.dyn_cast<triton::gpu::SliceEncodingAttr>();
+  auto sliceEncoding = mlir::dyn_cast<triton::gpu::SliceEncodingAttr>(encoding);
   if (!sliceEncoding)
     return std::nullopt;
   if (op.getAxis() != sliceEncoding.getDim())
@@ -439,8 +442,8 @@ std::optional<Attribute> inferSrcEncoding(Operation *op, Attribute encoding) {
   if (op->hasTrait<mlir::OpTrait::SameOperandsAndResultEncoding>() ||
       op->hasTrait<mlir::OpTrait::SameLoadStoreOperandsAndResultEncoding>() ||
       op->hasTrait<mlir::OpTrait::Elementwise>() ||
-      isa<scf::WhileOp, scf::YieldOp, scf::ConditionOp, nvidia_gpu::DotWaitOp>(
-          op)) {
+      isa<scf::WhileOp, scf::YieldOp, scf::ConditionOp,
+          nvidia_gpu::WarpGroupDotWaitOp>(op)) {
     return encoding;
   }
 
@@ -469,7 +472,7 @@ std::optional<Attribute> inferDstEncoding(Operation *op, Attribute encoding) {
       op->hasTrait<mlir::OpTrait::SameLoadStoreOperandsAndResultEncoding>() ||
       op->hasTrait<mlir::OpTrait::Elementwise>() ||
       isa<scf::WhileOp, scf::ForOp, scf::YieldOp, scf::ConditionOp,
-          nvidia_gpu::DotWaitOp>(op))
+          nvidia_gpu::WarpGroupDotWaitOp>(op))
     return encoding;
   if (auto reduceOp = dyn_cast<triton::ReduceOp>(op))
     return inferDstEncoding(reduceOp, encoding);
@@ -541,7 +544,7 @@ bool canFoldIntoConversion(Operation *op, Attribute targetEncoding) {
     return !triton::gpu::isExpensiveCat(cast<triton::CatOp>(op),
                                         targetEncoding);
   if (auto convert = dyn_cast<triton::gpu::ConvertLayoutOp>(op)) {
-    if (targetEncoding.isa<triton::gpu::NvidiaMmaEncodingAttr>()) {
+    if (mlir::isa<triton::gpu::NvidiaMmaEncodingAttr>(targetEncoding)) {
       auto srcEncoding = convert.getSrc().getType().getEncoding();
       if (targetEncoding != srcEncoding)
         return false;
@@ -561,7 +564,7 @@ bool canFoldIntoConversion(Operation *op, Attribute targetEncoding) {
   }
   return isa<triton::gpu::ConvertLayoutOp, arith::ConstantOp,
              triton::MakeRangeOp, triton::SplatOp, triton::HistogramOp,
-             triton::gpu::LocalAllocOp>(op);
+             triton::gpu::LocalAllocOp, triton::gpu::LocalStoreOp>(op);
 }
 
 scf::ForOp replaceForOpWithNewSignature(
@@ -695,7 +698,7 @@ getConvertBackwardSlice(Value root, SetVector<Value> &slice,
 
     if (auto ifOp = currentValue.getDefiningOp<scf::IfOp>()) {
       auto results = ifOp.getResults();
-      unsigned argIdx = currentValue.cast<OpResult>().getResultNumber();
+      unsigned argIdx = mlir::cast<OpResult>(currentValue).getResultNumber();
 
       auto thenValue = ifOp.thenYield().getOperand(argIdx);
       auto elseValue = ifOp.elseYield().getOperand(argIdx);
@@ -816,6 +819,26 @@ bool isPureUnaryInlineAsm(Operation *op) {
          inlineAsmOp.getPure();
 }
 
+int getNVIDIAComputeCapability(Operation *module) {
+  assert(module->hasAttr(triton::AttrTargetName) &&
+         "Expected a target attribute on the module operation");
+
+  StringAttr targetAttr =
+      cast<StringAttr>(module->getAttr(triton::AttrTargetName));
+
+  StringRef ref = targetAttr.strref();
+  assert(ref.starts_with("cuda:") &&
+         "expected target attribute to be prefixed with \"cuda:\"");
+
+  StringRef capabilityStr = ref.drop_front(5); // drop the "cuda:"
+  int computeCapability;
+  bool parseError = capabilityStr.getAsInteger(10, computeCapability);
+  assert(!parseError &&
+         "invalid compute capability string in target attribute");
+
+  return computeCapability;
+}
+
 namespace {
 
 /// Detect dead arguments in scf.for op by assuming all the values are dead and
@@ -859,7 +882,7 @@ struct ForOpDeadArgElimination : public OpRewritePattern<scf::ForOp> {
     while (!queue.empty()) {
       Value value = queue.pop_back_val();
       if (auto nestedFor = value.getDefiningOp<scf::ForOp>()) {
-        auto result = value.cast<OpResult>();
+        auto result = mlir::cast<OpResult>(value);
         OpOperand &forOperand = *nestedFor.getTiedLoopInit(result);
         markLive(forOperand.get());
         auto nestedYieldOp =
@@ -870,7 +893,7 @@ struct ForOpDeadArgElimination : public OpRewritePattern<scf::ForOp> {
         continue;
       }
       if (auto nestedIf = value.getDefiningOp<scf::IfOp>()) {
-        auto result = value.cast<OpResult>();
+        auto result = mlir::cast<OpResult>(value);
         for (scf::YieldOp nestedYieldOp :
              {nestedIf.thenYield(), nestedIf.elseYield()}) {
           Value nestedYieldOperand =
@@ -889,7 +912,7 @@ struct ForOpDeadArgElimination : public OpRewritePattern<scf::ForOp> {
       }
       // If an argument block is live then the associated yield operand and
       // forOp operand are live.
-      auto arg = value.cast<BlockArgument>();
+      auto arg = mlir::cast<BlockArgument>(value);
       if (auto forOwner = dyn_cast<scf::ForOp>(arg.getOwner()->getParentOp())) {
         if (arg.getArgNumber() < forOwner.getNumInductionVars())
           continue;

@@ -1,7 +1,9 @@
 #include "PipeliningUtility.h"
+
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Support/LLVM.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
@@ -38,6 +40,13 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
     return op;
   if (isa<ttg::LocalLoadOp>(op))
     return op;
+  if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+    rewriter.setInsertionPoint(op);
+    Value cnd = getPredMask(rewriter, ifOp.getCondition().getType(),
+                            ifOp.getCondition(), pred);
+    ifOp.getConditionMutable().assign(cnd);
+    return op;
+  }
   if (auto asyncCopyOp = dyn_cast<ttg::AsyncCopyGlobalToLocalOp>(op)) {
     rewriter.setInsertionPoint(asyncCopyOp);
     Value mask = getPredMask(rewriter, asyncCopyOp.getSrc().getType(),
@@ -59,6 +68,13 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
     copyOp.getPredMutable().assign(mask);
     return op;
   }
+  if (auto expectOp = dyn_cast<ttng::BarrierExpectOp>(op)) {
+    rewriter.setInsertionPoint(expectOp);
+    Value mask = getPredMask(rewriter, expectOp.getPred().getType(),
+                             expectOp.getPred(), pred);
+    expectOp.getPredMutable().assign(mask);
+    return op;
+  }
 
   assert("don't know how to predicate this op" && false);
   return op;
@@ -74,7 +90,7 @@ void mlir::triton::addDep(Operation *op, DenseSet<Operation *> &deps,
   for (Value operand : op->getOperands()) {
     Value v = operand;
     llvm::SmallDenseSet<Value> seen;
-    while (auto arg = v.dyn_cast<BlockArgument>()) {
+    while (auto arg = mlir::dyn_cast<BlockArgument>(v)) {
       if (!includeArg)
         break;
       if (!seen.insert(v).second)

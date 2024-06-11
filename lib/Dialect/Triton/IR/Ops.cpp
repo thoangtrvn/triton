@@ -4,6 +4,7 @@
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Interfaces/FunctionImplementation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Support/LLVM.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
@@ -15,7 +16,7 @@ void LoadOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   effects.emplace_back(MemoryEffects::Read::get(), getPtr(),
-                       SideEffects::DefaultResource::get());
+                       triton::GlobalMemory::get());
   if (getIsVolatile())
     effects.emplace_back(MemoryEffects::Write::get(),
                          SideEffects::DefaultResource::get());
@@ -95,7 +96,7 @@ struct CanonicalizeMaskedLoadPattern : public OpRewritePattern<LoadOp> {
     if (!constantMask)
       return failure();
 
-    auto splatMask = constantMask.getValue().dyn_cast<SplatElementsAttr>();
+    auto splatMask = mlir::dyn_cast<SplatElementsAttr>(constantMask.getValue());
     if (!splatMask)
       return failure();
 
@@ -163,7 +164,7 @@ struct CanonicalizeMaskedStorePattern : public OpRewritePattern<StoreOp> {
     if (!constantMask)
       return failure();
 
-    auto splatMask = constantMask.getValue().dyn_cast<SplatElementsAttr>();
+    auto splatMask = mlir::dyn_cast<SplatElementsAttr>(constantMask.getValue());
     if (!splatMask)
       return failure();
 
@@ -223,9 +224,9 @@ LogicalResult TransOp::inferReturnTypes(
       return failure();
     }
   }
-  if (isa<MemDescType>(argTy)) {
-    inferredReturnTypes.push_back(
-        MemDescType::get(retShape, retEltTy, retEncoding));
+  if (auto memDescTy = dyn_cast<MemDescType>(argTy)) {
+    inferredReturnTypes.push_back(MemDescType::get(
+        retShape, retEltTy, retEncoding, memDescTy.getMemorySpace()));
   } else {
     inferredReturnTypes.push_back(
         RankedTensorType::get(retShape, retEltTy, retEncoding));
@@ -631,7 +632,7 @@ static OpFoldResult foldViewLikeOp(ViewLikeOp op, Attribute value) {
     return {};
 
   auto shapedType = cast<ShapedType>(op.getType());
-  if (auto denseElemsAttr = value.dyn_cast<DenseElementsAttr>()) {
+  if (auto denseElemsAttr = dyn_cast<DenseElementsAttr>(value)) {
     if (denseElemsAttr.isSplat()) {
       return denseElemsAttr.resizeSplat(shapedType);
     } else {
@@ -748,7 +749,7 @@ OpFoldResult BroadcastOp::fold(FoldAdaptor adaptor) {
   if (!value)
     return {};
 
-  if (auto denseElemsAttr = value.dyn_cast<SplatElementsAttr>()) {
+  if (auto denseElemsAttr = dyn_cast<SplatElementsAttr>(value)) {
     auto shapedType = cast<ShapedType>(getType());
     return denseElemsAttr.resizeSplat(shapedType);
   }

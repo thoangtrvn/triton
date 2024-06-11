@@ -22,6 +22,7 @@
  */
 
 #include "Utility.h"
+#include "mlir/Support/LLVM.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -140,7 +141,7 @@ public:
       : base(base), shape(shape), warpId(warpId), dimWpt(dimWpt), trans(trans),
         instrShape(instrShape) {
     auto ty = cast<MemDescType>(tensor.getType());
-    auto sharedLayout = ty.getEncoding().cast<SharedEncodingAttr>();
+    auto sharedLayout = cast<SharedEncodingAttr>(ty.getEncoding());
     ord = sharedLayout.getOrder();
     const int perPhase = sharedLayout.getPerPhase();
     const int maxPhase = sharedLayout.getMaxPhase();
@@ -197,7 +198,7 @@ DotOpMmaV3SmemLoader loadA(const LLVMTypeConverter *typeConverter,
                            const NvidiaMmaEncodingAttr &mmaEncoding,
                            Value tensor, Value smemObjBase, Value thread) {
   auto aTy = cast<TensorOrMemDesc>(tensor.getType());
-  auto aSharedLayout = aTy.getEncoding().dyn_cast<SharedEncodingAttr>();
+  auto aSharedLayout = dyn_cast<SharedEncodingAttr>(aTy.getEncoding());
   assert(aSharedLayout && "only support load dot operand from shared.");
   auto instrShape = mmaEncoding.getInstrShape();
   auto wpt = mmaEncoding.getWarpsPerCTA();
@@ -234,7 +235,7 @@ DotOpMmaV3SmemLoader loadB(const LLVMTypeConverter *typeConverter,
                            NvidiaMmaEncodingAttr &mmaEncoding, Value tensor,
                            Value base, Value thread) {
   auto bTy = cast<MemDescType>(tensor.getType());
-  auto bSharedLayout = bTy.getEncoding().cast<SharedEncodingAttr>();
+  auto bSharedLayout = cast<SharedEncodingAttr>(bTy.getEncoding());
   assert(bSharedLayout && "only support load B from shared.");
   auto instrShape = mmaEncoding.getInstrShape();
   auto wpt = mmaEncoding.getWarpsPerCTA();
@@ -362,9 +363,9 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   auto aTensorTy = cast<TensorOrMemDesc>(a.getType());
   auto bTensorTy = cast<TensorOrMemDesc>(b.getType());
   auto dTensorTy = cast<RankedTensorType>(d.getType());
-  auto aSharedLayout = aTensorTy.getEncoding().dyn_cast<SharedEncodingAttr>();
-  auto bSharedLayout = bTensorTy.getEncoding().cast<SharedEncodingAttr>();
-  auto mmaEncoding = dTensorTy.getEncoding().cast<NvidiaMmaEncodingAttr>();
+  auto aSharedLayout = dyn_cast<SharedEncodingAttr>(aTensorTy.getEncoding());
+  auto bSharedLayout = cast<SharedEncodingAttr>(bTensorTy.getEncoding());
+  auto mmaEncoding = cast<NvidiaMmaEncodingAttr>(dTensorTy.getEncoding());
   auto bOrd = bSharedLayout.getOrder();
   bool transA = false;
   Value baseA;
@@ -499,34 +500,19 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   return success();
 }
 
-LogicalResult convertWGMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
+LogicalResult convertWGMMA(triton::nvidia_gpu::WarpGroupDotOp op,
+                           triton::nvidia_gpu::WarpGroupDotOp::Adaptor adaptor,
                            const LLVMTypeConverter *typeConverter,
                            ConversionPatternRewriter &rewriter, Value thread) {
   auto AEnc = op.getA().getType().getEncoding();
   auto BEnc = op.getB().getType().getEncoding();
-  assert(AEnc.isa<SharedEncodingAttr>() || AEnc.isa<DotOperandEncodingAttr>());
-  assert(BEnc.isa<SharedEncodingAttr>() &&
-         "Operand B should use Shared layout.");
-  return convertDot(typeConverter, rewriter, op.getLoc(), op.getOperation(), //
-                    op.getA(), op.getB(), op.getC(), op.getD(),              //
-                    adaptor.getA(), adaptor.getB(), adaptor.getC(),          //
-                    op.getInputPrecision() == InputPrecision::TF32,
-                    op.getMaxNumImpreciseAcc(), true, thread);
-}
-
-LogicalResult convertAsyncWGMMA(triton::nvidia_gpu::DotAsyncOp op,
-                                triton::nvidia_gpu::DotAsyncOp::Adaptor adaptor,
-                                const LLVMTypeConverter *typeConverter,
-                                ConversionPatternRewriter &rewriter,
-                                Value thread) {
-  auto AEnc = op.getA().getType().getEncoding();
-  auto BEnc = op.getB().getType().getEncoding();
-  assert(AEnc.isa<SharedEncodingAttr>() || AEnc.isa<DotOperandEncodingAttr>());
-  assert(BEnc.isa<SharedEncodingAttr>() &&
+  assert(mlir::isa<SharedEncodingAttr>(AEnc) ||
+         mlir::isa<DotOperandEncodingAttr>(AEnc));
+  assert(mlir::isa<SharedEncodingAttr>(BEnc) &&
          "Operand B should use Shared layout.");
   return convertDot(typeConverter, rewriter, op.getLoc(), op.getOperation(), //
                     op.getA(), op.getB(), op.getC(), op.getD(),              //
                     adaptor.getA(), adaptor.getB(), adaptor.getC(),
                     op.getInputPrecision() == InputPrecision::TF32,
-                    op.getMaxNumImpreciseAcc(), false, thread);
+                    op.getMaxNumImpreciseAcc(), !op.getIsAsync(), thread);
 }

@@ -1,9 +1,8 @@
-#include "TritonNVIDIAGPUToLLVM/PTXAsmFormat.h"
-
 #include "PatternTritonGPUOpToLLVM.h"
-#include "Utility.h"
-
 #include "TargetInfo.h"
+#include "TritonNVIDIAGPUToLLVM/PTXAsmFormat.h"
+#include "Utility.h"
+#include "mlir/Support/LLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVMBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 
@@ -356,7 +355,7 @@ struct FpToFpOpConversion
     cvt(res, operand);
     // TODO: This is a hack to get the right type. We should be able to invoke
     // the type converter
-    return builder.launch(rewriter, loc, i16_ty, false);
+    return builder.launch(rewriter, loc, bf16_ty, false);
   }
 
   static Value convertFp32ToFp16(Location loc,
@@ -575,7 +574,7 @@ struct FMulOpConversion
       auto lhs = builder.newOperand(operands[0][0], "h");
       auto rhs = builder.newOperand(operands[0][1], "h");
       fMul({res, lhs, rhs}, /*onlyAttachMLIRArgs=*/true);
-      return {builder.launch(rewriter, loc, i16_ty, false)};
+      return {builder.launch(rewriter, loc, bf16_ty, false)};
     } else {
       return {rewriter.create<LLVM::FMulOp>(loc, elemTy, operands[0][0],
                                             operands[0][1])};
@@ -605,7 +604,7 @@ struct FAddOpConversion
       auto lhs = builder.newOperand(operands[0][0], "h");
       auto rhs = builder.newOperand(operands[0][1], "h");
       fAdd({res, lhs, rhs}, /*onlyAttachMLIRArgs=*/true);
-      return {builder.launch(rewriter, loc, i16_ty, false)};
+      return {builder.launch(rewriter, loc, bf16_ty, false)};
     } else {
       return {rewriter.create<LLVM::FAddOp>(loc, elemTy, operands[0][0],
                                             operands[0][1])};
@@ -635,7 +634,7 @@ struct FSubOpConversion
       auto lhs = builder.newOperand(operands[0][0], "h");
       auto rhs = builder.newOperand(operands[0][1], "h");
       fSub({res, lhs, rhs}, /*onlyAttachMLIRArgs=*/true);
-      return {builder.launch(rewriter, loc, i16_ty, false)};
+      return {builder.launch(rewriter, loc, bf16_ty, false)};
     } else {
       return {rewriter.create<LLVM::FSubOp>(loc, elemTy, operands[0][0],
                                             operands[0][1])};
@@ -798,8 +797,8 @@ struct ClampFOpConversion
 
     auto getSplatInitializer = [](Value v) -> std::optional<double> {
       if (auto constOp = v.getDefiningOp<arith::ConstantOp>()) {
-        if (auto attr =
-                constOp.getValueAttr().dyn_cast<DenseIntOrFPElementsAttr>()) {
+        if (auto attr = mlir::dyn_cast<DenseIntOrFPElementsAttr>(
+                constOp.getValueAttr())) {
           if (attr.isSplat()) {
             return attr.getSplatValue<APFloat>().convertToDouble();
           }

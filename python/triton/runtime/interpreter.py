@@ -460,6 +460,8 @@ class InterpreterBuilder:
     create_and = lambda self, lhs, rhs: self.binary_op(lhs, rhs, np.bitwise_and)
     create_xor = lambda self, lhs, rhs: self.binary_op(lhs, rhs, np.bitwise_xor)
     create_or = lambda self, lhs, rhs: self.binary_op(lhs, rhs, np.bitwise_or)
+    create_int_to_ptr = create_bitcast
+    create_ptr_to_int = create_bitcast
 
     def create_idiv(self, lhs, rhs):
         # Triton has IEEE, not numpy/torch, semantics for %, and those carry
@@ -583,12 +585,6 @@ class InterpreterBuilder:
 
     def create_broadcast(self, arg, shape):
         return TensorHandle(np.broadcast_to(arg.data, shape), arg.dtype.scalar)
-
-    def create_int_to_ptr(self, val, dst_ty):
-        return TensorHandle(val.data.astype(np.uint64), dst_ty.scalar)
-
-    def create_ptr_to_int(self, val, dst_ty):
-        return TensorHandle(val.data.astype(np.uint64), dst_ty.scalar)
 
     def create_cat(self, lhs, rhs):
         return TensorHandle(np.concatenate([lhs.data, rhs.data]), lhs.dtype.scalar)
@@ -1027,7 +1023,7 @@ def _implicit_cvt(arg):
 interpreter_builder = InterpreterBuilder()
 
 # These keywords are not supported by the interpreter
-RESERVED_KWS = ["num_warps", "num_stages", "num_ctas", "enable_fp_fusion", "grid"]
+RESERVED_KWS = ["num_warps", "num_stages", "num_ctas", "enable_fp_fusion", "grid", "maxnreg"]
 
 
 class GridExecutor:

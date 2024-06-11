@@ -3,6 +3,7 @@
 
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Support/LLVM.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -86,10 +87,12 @@ public:
     if (!encoding)
       // encoding not available
       return resultVals;
-    if (!encoding.dyn_cast<BlockedEncodingAttr>() &&
-        !encoding.dyn_cast<SliceEncodingAttr>()) {
-      // TODO: constraining the ecndoing type here is necessary for avoiding
-      // crashes in the getElemsPerThread call below happening in the
+    Attribute baseEncoding = encoding;
+    while (auto sliced = dyn_cast<SliceEncodingAttr>(baseEncoding))
+      baseEncoding = sliced.getParent();
+    if (isa<NvidiaMmaEncodingAttr, DotOperandEncodingAttr>(baseEncoding)) {
+      // TODO: this logic seems incorrect for mma layout. Skip for now.
+      // The following test crashes and some other miscompile:
       // test_core::test_fp8_dot_acc
       return resultVals;
     }
@@ -102,8 +105,8 @@ public:
     if (!axisInfo)
       // axis info (e.g., constancy) not available
       return resultVals;
-    SmallVector<unsigned> sizePerThread = getSizePerThread(encoding);
-    if (rank != sizePerThread.size())
+    SmallVector<unsigned> contigPerThread = getContigPerThread(encoding);
+    if (rank != contigPerThread.size())
       return resultVals;
 
     SmallVector<int64_t> constancy = axisInfo->getConstancy();
@@ -111,13 +114,13 @@ public:
       return resultVals;
     bool hasConstancy = false;
     for (int i = 0; i < rank; ++i) {
-      if (constancy[i] > sizePerThread[i]) {
-        if (constancy[i] % sizePerThread[i] != 0)
-          // constancy is not evenly covered by sizePerThread
+      if (constancy[i] > contigPerThread[i]) {
+        if (constancy[i] % contigPerThread[i] != 0)
+          // constancy is not evenly covered by contigPerThread
           return resultVals;
         // can't move the values across different
-        // "sizePerThread"-sized blocks
-        constancy[i] = sizePerThread[i];
+        // "contigPerThread"-sized blocks
+        constancy[i] = contigPerThread[i];
       }
       if (elemsPerThread[i] < 1 || constancy[i] < 1)
         return resultVals;

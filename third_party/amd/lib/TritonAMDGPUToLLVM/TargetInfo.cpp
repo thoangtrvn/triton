@@ -1,6 +1,6 @@
 #include "TargetInfo.h"
+#include "TritonAMDGPUToLLVM/GCNAsmFormat.h"
 #include "Utility.h"
-#include "amd/include/TritonAMDGPUToLLVM/GCNAsmFormat.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -28,6 +28,12 @@ Value printfPromoteValue(ConversionPatternRewriter &rewriter, Value value) {
   auto *context = rewriter.getContext();
   auto loc = UnknownLoc::get(context);
   auto type = value.getType();
+
+  if (isa<LLVM::LLVMPointerType>(type)) {
+    // The llvm.ptrtoint op requires signless integer types.
+    return ptrtoint(i64_ty, value);
+  }
+
   assert(type.getIntOrFloatBitWidth() <= 64);
 
   if (auto floatType = dyn_cast<FloatType>(type)) {
@@ -112,7 +118,8 @@ Value TargetInfo::programId(ConversionPatternRewriter &rewriter, Location loc,
 
 bool TargetInfo::warpReduce(ConversionPatternRewriter &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
-                            unsigned numLaneToReduce) const {
+                            unsigned numLaneToReduce,
+                            unsigned interleave) const {
   return false;
 }
 
@@ -120,7 +127,8 @@ bool TargetInfo::processReplicaUsingStMatrix(
     ConversionPatternRewriter &rewriter, Location loc, Value smemBase,
     SmallVector<Value> &vals, RankedTensorType srcTy, Type elemTy,
     ArrayRef<unsigned> paddedRepShape, ArrayRef<unsigned> origRepShape,
-    ArrayRef<unsigned> outOrd, unsigned accumNumReplicates) const {
+    ArrayRef<unsigned> outOrd, unsigned accumNumReplicates,
+    int swizzleByteWidth) const {
   return false;
 }
 
