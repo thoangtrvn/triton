@@ -221,6 +221,8 @@ def TT_AdvanceOp : TT_Op<"advance",
     let results = (outs TT_TensorPtr:$result);
 
     let assemblyFormat = "$ptr `,` `[` $offsets `]` attr-dict `:` type($result)";
+
+    let hasFolder = 1;
 }
 
 //
@@ -490,6 +492,7 @@ def TT_BroadcastOp : TT_Op<"broadcast", [Pure,
 
     let hasCanonicalizeMethod = 1;
     let hasFolder = 1;
+    let hasVerifier = 1;
 }
 
 // cat is not `pure` because it may reorder elements
@@ -599,6 +602,12 @@ def TT_GetProgramIdOp : TT_Op<"get_program_id", [Pure]> {
 
     let assemblyFormat = "$axis attr-dict `:` type($result)";
 
+    let builders = [
+      OpBuilder<(ins "int":$axis), [{
+        build($_builder, $_state, $_builder.getI32Type(), ProgramIDDimAttr::get($_builder.getContext(), ProgramIDDim(axis)));
+      }]>
+    ];
+
     let extraClassDeclaration = [{
       int32_t getAxisAsInt() {
         return static_cast<int32_t>(getAxis());
@@ -612,6 +621,11 @@ def TT_GetNumProgramsOp : TT_Op<"get_num_programs", [Pure]> {
     let results = (outs I32:$result);
 
     let assemblyFormat = "$axis attr-dict `:` type($result)";
+    let builders = [
+      OpBuilder<(ins "int":$axis), [{
+        build($_builder, $_state, $_builder.getI32Type(), ProgramIDDimAttr::get($_builder.getContext(), ProgramIDDim(axis)));
+      }]>
+    ];
 
     let extraClassDeclaration = [{
       int32_t getAxisAsInt() {
@@ -817,8 +831,14 @@ def TT_HistogramOp : TT_Op<"histogram", [Pure]> {
 //
 // Print Op
 //
-def TT_PrintOp : TT_Op<"print", [MemoryEffects<[MemWrite<GlobalMemory>]>]>,
-  Arguments<(ins StrAttr:$prefix, BoolAttr:$hex, Variadic<AnyTypeOf<[TT_Type]>>:$args)> {
+def TT_PrintOp : TT_Op<"print", [SameVariadicOperandSize, MemoryEffects<[MemWrite<GlobalMemory>]>]> {
+  let arguments = (
+    ins
+    StrAttr:$prefix,
+    BoolAttr:$hex,
+    Variadic<AnyTypeOf<[TT_Type]>>:$args,
+    DenseI32ArrayAttr:$isSigned
+  );
   let summary = "Device-side print, as in CUDA for debugging";
   let description = [{
     `tt.print` takes a literal string prefix and an arbitrary number of scalar or tensor arguments that should be printed.
@@ -835,11 +855,11 @@ def TT_PrintOp : TT_Op<"print", [MemoryEffects<[MemWrite<GlobalMemory>]>]>,
 def TT_AssertOp : TT_Op<"assert", [MemoryEffects<[MemWrite<GlobalMemory>]>]> {
   let summary = "Device-side assert, as in CUDA for correctness checking";
   let description = [{
-    `tt.assert` takes a condition tensor, a message string, a file string, a function string, and a line number.
+    `tt.assert` takes a condition tensor and a message string.
     If the condition is false, the message is printed, and the program is aborted.
   }];
-  let arguments = (ins TT_Tensor:$condition, StrAttr:$message, StrAttr:$file, StrAttr:$func, I32Attr:$line);
-  let assemblyFormat = "$condition `,` $message `,` $file `,` $func `,` $line attr-dict `:` type($condition)";
+  let arguments = (ins TT_Tensor:$condition, StrAttr:$message);
+  let assemblyFormat = "$condition `,` $message attr-dict `:` type($condition)";
 }
 
 //
@@ -850,7 +870,7 @@ def TT_MakeTensorPtrOp : TT_Op<"make_tensor_ptr",
                                 SameVariadicOperandSize,
                                 TypesMatchWith<"infer pointer type from the result type",
                                                "result", "base",
-                                               "getPointerType(getElementTypeOfTensorPointerType($_self))">]> {
+                                               "getPointerType(getElementTypeOfTensorPointerType($_self), getAddressSpace($_self))">]> {
   let summary = "Make a tensor pointer type with meta information of the parent tensor and the block specified";
 
   let description = [{
@@ -1124,7 +1144,7 @@ def TT_ExperimentalDescriptorLoadOp : TT_Op<"experimental_descriptor_load", [
 }
 
 def TT_ExperimentalDescriptorStoreOp : TT_Op<"experimental_descriptor_store", [
-  MemoryEffects<[MemWrite<GlobalMemory>]>]> {
+  MemoryEffects<[MemRead<GlobalMemory>, MemWrite<GlobalMemory>]>]> {
     let summary = "store value based on descriptor";
     let description = [{
       This operation will be lowered to Nvidia TMA store operation on targets supporting it.
@@ -1146,5 +1166,55 @@ def TT_ExperimentalDescriptorStoreOp : TT_Op<"experimental_descriptor_store", [
       attr-dict `:` qualified(type($desc_ptr)) `,` type($src)
     }];
 }
+
+def TT_ExperimentalTensormapCreateOp: TT_Op<
+  "experimental_tensormap_create",
+  [
+    MemoryEffects<[MemRead<GlobalMemory>, MemWrite<GlobalMemory>]>,
+    AttrSizedOperandSegments,
+  ]
+> {
+    let summary = "Create a new TMA descriptor on device";
+    let arguments = (
+        ins
+        TT_PtrType:$desc_ptr,
+        TT_PtrType:$global_address,
+        Variadic<I32>:$box_dim,
+        Variadic<I32>:$global_dim,
+        Variadic<I64>:$global_stride,
+        Variadic<I32>:$element_stride,
+        ConfinedAttr<I32Attr, [IntNonNegative, IntMaxValue<12>]>:$elem_type,
+        ConfinedAttr<I32Attr, [IntNonNegative, IntMaxValue<2>]>:$interleave_layout,
+        ConfinedAttr<I32Attr, [IntNonNegative, IntMaxValue<3>]>:$swizzle_mode,
+        ConfinedAttr<I32Attr, [IntNonNegative, IntMaxValue<1>]>:$fill_mode
+    );
+    let extraClassDeclaration = [{
+        int32_t getRank() {
+            return getBoxDim().size();
+        }
+    }];
+    let assemblyFormat = [{
+      $desc_ptr `,` $global_address `,`
+      `[` $box_dim `]` `,`
+      `[` $global_dim `]` `,`
+      `[` $global_stride `]` `,`
+      `[` $element_stride `]`
+      attr-dict `:` functional-type(operands, results)
+    }];
+
+    let hasVerifier = 1;
+}
+
+def TT_ExperimentalTensormapFenceproxyAcquireOp: TT_Op<
+  "experimental_tensormap_fenceproxy_acquire",
+  [MemoryEffects<[MemWrite<GlobalMemory>]>]
+> {
+    let summary = "Acquire fence on a tensormap object";
+    let arguments = (ins TT_PtrType:$desc_ptr);
+    let assemblyFormat = [{
+      $desc_ptr attr-dict `:` qualified(type($desc_ptr))
+    }];
+}
+
 
 #endif // Triton_OPS
